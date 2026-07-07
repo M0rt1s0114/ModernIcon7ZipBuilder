@@ -1,4 +1,4 @@
-name: Auto Build 7-Zip x64 (Original + Custom) with Installers
+name: Auto Build 7-Zip x64 (Green ZIP only)
 
 on:
   schedule:
@@ -12,270 +12,207 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: windows-latest
-
+  # ---------- 版本检查 ----------
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_digits: ${{ steps.version.outputs.version_digits }}
+      build_tag: ${{ steps.tag.outputs.build_tag }}
+      skip: ${{ steps.check.outputs.skip }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Get latest 7-Zip version from ip7z/7zip tags
+      - name: Get latest version from ip7z/7zip
         id: version
         shell: pwsh
         run: |
           $tag = gh api repos/ip7z/7zip/tags --jq '.[0].name' --method GET 2>$null
-          if (-not $tag) { throw "无法从 ip7z/7zip 获取最新 tag" }
-          Write-Host "Latest tag: $tag"
-          $cleanTag = $tag -replace '^v', ''
-          $parts = $cleanTag -split '\.'
-          if ($parts.Count -ne 2) { throw "Tag 格式不是 X.Y: $tag" }
-          $major = $parts[0]
-          $minor = $parts[1]
-          $version = "$major.$minor"
-          $versionDigits = "$major$minor"
-          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "VERSION_DIGITS=$versionDigits" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Version: $versionDigits (from $tag)"
+          if (-not $tag) { throw "无法获取最新 tag" }
+          $clean = $tag -replace '^v',''
+          $parts = $clean -split '\.'
+          if ($parts.Count -ne 2) { throw "Tag 格式异常: $tag" }
+          $digits = $parts[0] + $parts[1]
+          $ver = "$($parts[0]).$($parts[1])"
+          "version=$ver" >> $env:GITHUB_OUTPUT
+          "version_digits=$digits" >> $env:GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check if this version already built
+      - name: Check if already built
+        id: check
         shell: pwsh
         run: |
-          $versionDigits = $env:VERSION_DIGITS
-          $releases = gh release list --json name --limit 100 --repo $env:GITHUB_REPOSITORY 2>$null
+          $digits = '${{ steps.version.outputs.version_digits }}'
+          $releases = gh release list --json name --limit 50 --repo ${{ github.repository }} 2>$null
+          $skip = 'false'
           if ($releases) {
-            $built = $releases | ConvertFrom-Json | Where-Object { $_.name -like "7zip-$versionDigits-*" }
-            if ($built) {
-              Write-Host "Release for version $versionDigits already exists. Skipping build."
-              exit 0
-            }
+            $built = $releases | ConvertFrom-Json | Where-Object { $_.name -like "7zip-$digits-*" }
+            if ($built) { $skip = 'true' }
           }
-          Write-Host "No existing release for version $versionDigits. Proceeding."
+          "skip=$skip" >> $env:GITHUB_OUTPUT
+          Write-Host "Skip: $skip"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine next build tag (YYHN)
-        id: buildtag
+      - name: Determine build tag
+        id: tag
+        if: steps.check.outputs.skip != 'true'
         shell: pwsh
         run: |
-          $yearSuffix = (Get-Date).Year % 100
-          $yearStr = $yearSuffix.ToString("00")
-          $existingTags = gh release list --json tagName --limit 100 --repo $env:GITHUB_REPOSITORY 2>$null
-          $maxN = 0
-          if ($existingTags) {
-            $tags = ($existingTags | ConvertFrom-Json).tagName
-            $pattern = "^$yearStr`H(\d+)$"
-            foreach ($t in $tags) {
-              if ($t -match $pattern) {
-                $n = [int]$matches[1]
-                if ($n -gt $maxN) { $maxN = $n }
-              }
+          $year = (Get-Date).Year % 100
+          $prefix = "{0:D2}H" -f $year
+          $tags = gh release list --json tagName --limit 100 --repo ${{ github.repository }} 2>$null
+          $max = 0
+          if ($tags) {
+            ($tags | ConvertFrom-Json).tagName | ForEach-Object {
+              if ($_ -match "^$prefix(\d+)$") { $n = [int]$matches[1]; if ($n -gt $max) { $max = $n } }
             }
           }
-          $nextN = $maxN + 1
-          $buildTag = "$yearStr`H$nextN"
+          $next = $max + 1
+          $buildTag = "$prefix$next"
+          "build_tag=$buildTag" >> $env:GITHUB_OUTPUT
           Write-Host "Build tag: $buildTag"
-          "BUILD_TAG=$buildTag" | Out-File -FilePath $env:GITHUB_ENV -Append
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------- 矩阵编译 ----------
+  build:
+    needs: setup
+    if: needs.setup.outputs.skip != 'true'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [orig, custom]
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+      VERSION_DIGITS: ${{ needs.setup.outputs.version_digits }}
+      BUILD_TAG: ${{ needs.setup.outputs.build_tag }}
+    steps:
+      - name: Checkout repository (for resources)
+        uses: actions/checkout@v7
 
       - name: Find Visual Studio vcvarsall.bat
-        id: find_vs
         shell: pwsh
         run: |
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (-not (Test-Path $vsWhere)) { throw "vswhere not found" }
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vsPath) { throw "No suitable Visual Studio installation found" }
+          if (-not $vsPath) { throw "No suitable VS installation" }
           $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
           "VCVARS=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Found vcvarsall.bat at: $vcvars"
 
-      - name: Clone 7-Zip source from git (original & custom)
+      - name: Clone source
         shell: pwsh
         run: |
           $tag = gh api repos/ip7z/7zip/tags --jq '.[0].name' --method GET 2>$null
-          if (-not $tag) { throw "无法获取最新 tag 用于克隆" }
-          $orig = "${{ runner.temp }}\src_orig"
-          $custom = "${{ runner.temp }}\src_custom"
-          git clone -b $tag --depth 1 https://github.com/ip7z/7zip.git $orig
-          git clone -b $tag --depth 1 https://github.com/ip7z/7zip.git $custom
-          if (-not (Test-Path "$orig\CPP\7zip")) { throw "源码目录结构与预期不符" }
-          Write-Host "Source directories ready."
+          if (-not $tag) { throw "无法获取 tag 用于克隆" }
+          $src = "${{ runner.temp }}\src"
+          git clone -b $tag --depth 1 https://github.com/ip7z/7zip.git $src
+          if (-not (Test-Path "$src\CPP\7zip")) { throw "源码结构错误" }
+          "SRC_DIR=$src" | Out-File -FilePath $env:GITHUB_ENV -Append
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Replace resources in custom build
+      - name: Replace resources (custom only)
+        if: matrix.flavor == 'custom'
         shell: pwsh
         run: |
           $script = Join-Path $env:GITHUB_WORKSPACE "scripts\replace-resources.ps1"
           $resDir = Join-Path $env:GITHUB_WORKSPACE "resources"
-          if (Test-Path $script) {
-            & $script -BuildDirectory "${{ runner.temp }}\src_custom" -ResourceDir $resDir
+          & $script -BuildDirectory $env:SRC_DIR -ResourceDir $resDir
+
+      - name: Build all targets
+        shell: cmd
+        working-directory: ${{ env.SRC_DIR }}\CPP\7zip
+        run: |
+          call "${{ env.VCVARS }}" x64
+          nmake NEW_COMPILER=1 MY_CPU=AMD64
+          if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+          if exist "..\..\C\Util\7zipInstall" (
+            cd ..\..\C\Util\7zipInstall
+            nmake NEW_COMPILER=1 MY_CPU=AMD64
+            cd ..\..\..\CPP\7zip
+          )
+          if exist "..\..\C\Util\7zipUninstall" (
+            cd ..\..\C\Util\7zipUninstall
+            nmake NEW_COMPILER=1 MY_CPU=AMD64
+            cd ..\..\..\CPP\7zip
+          )
+
+      - name: Collect and package green ZIP
+        shell: pwsh
+        run: |
+          $src = $env:SRC_DIR
+          $base = "$src\CPP\7zip"
+          $tmp = "${{ runner.temp }}\pkg"
+          $green = "$tmp\green"
+          New-Item -ItemType Directory -Force -Path $green | Out-Null
+
+          # 拷贝核心编译产物 (按照您的脚本路径)
+          Copy-Item "$base\Bundles\Format7zF\x64\7z.dll" $green -ErrorAction Stop
+          Copy-Item "$base\UI\Console\x64\7z.exe" $green -ErrorAction Stop
+          Copy-Item "$base\UI\FileManager\x64\7zFM.exe" $green -ErrorAction Stop
+          Copy-Item "$base\UI\GUI\x64\7zG.exe" $green -ErrorAction Stop
+          Copy-Item "$base\Bundles\SFXWin\x64\7z.sfx" $green -ErrorAction Stop
+          Copy-Item "$base\Bundles\SFXCon\x64\7zCon.sfx" $green -ErrorAction Stop
+          Copy-Item "$base\UI\Explorer\x64\7-zip.dll" $green -ErrorAction Stop
+          if (Test-Path "$base\UI\Explorer\x86\7-zip.dll") {
+            Copy-Item "$base\UI\Explorer\x86\7-zip.dll" "$green\7-zip32.dll" -ErrorAction SilentlyContinue
+          }
+          # 安装/卸载工具不包含在绿色版中
+
+          # 下载官方安装包以提取帮助文件、语言包等
+          $officialUrl = "https://www.7-zip.org/a/7z$env:VERSION_DIGITS-x64.exe"
+          $officialDl = "$tmp\official.exe"
+          Invoke-WebRequest -Uri $officialUrl -OutFile $officialDl -ErrorAction Stop
+          $officialExt = "$tmp\official"
+          & "$green\7z.exe" x $officialDl -o"$officialExt" -y | Out-Null
+
+          Copy-Item "$officialExt\History.txt" $green -ErrorAction SilentlyContinue
+          Copy-Item "$officialExt\License.txt" $green -ErrorAction SilentlyContinue
+          Copy-Item "$officialExt\readme.txt" $green -ErrorAction SilentlyContinue
+          Copy-Item "$officialExt\7-zip.chm" $green -ErrorAction SilentlyContinue
+          Copy-Item "$officialExt\descript.ion" $green -ErrorAction SilentlyContinue
+          if (Test-Path "$officialExt\Lang") {
+            Copy-Item -Recurse -Force "$officialExt\Lang\*" "$green\Lang\" -ErrorAction SilentlyContinue
           } else {
-            throw "替换脚本 scripts\replace-resources.ps1 不存在"
+            New-Item -ItemType Directory -Force -Path "$green\Lang" | Out-Null
           }
 
-      - name: Build all targets (original)
-        shell: cmd
-        working-directory: ${{ runner.temp }}\src_orig\CPP\7zip
-        run: |
-          call "${{ env.VCVARS }}" x64
-          nmake NEW_COMPILER=1 MY_CPU=AMD64
-          if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
-          rem 编译安装/卸载工具（如果存在）
-          if exist "..\..\C\Util\7zipInstall" (
-            cd ..\..\C\Util\7zipInstall
-            nmake NEW_COMPILER=1 MY_CPU=AMD64
-            cd ..\..\..\CPP\7zip
-          )
-          if exist "..\..\C\Util\7zipUninstall" (
-            cd ..\..\C\Util\7zipUninstall
-            nmake NEW_COMPILER=1 MY_CPU=AMD64
-            cd ..\..\..\CPP\7zip
-          )
+          # 打包为 ZIP
+          $zipName = "7z-${{ matrix.flavor }}-$env:VERSION-x64.zip"
+          $zipPath = Join-Path $tmp $zipName
+          Compress-Archive -Path "$green\*" -DestinationPath $zipPath -Force
+          Write-Host "Green ZIP created: $zipPath"
 
-      - name: Build all targets (custom)
-        shell: cmd
-        working-directory: ${{ runner.temp }}\src_custom\CPP\7zip
-        run: |
-          call "${{ env.VCVARS }}" x64
-          nmake NEW_COMPILER=1 MY_CPU=AMD64
-          if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
-          if exist "..\..\C\Util\7zipInstall" (
-            cd ..\..\C\Util\7zipInstall
-            nmake NEW_COMPILER=1 MY_CPU=AMD64
-            cd ..\..\..\CPP\7zip
-          )
-          if exist "..\..\C\Util\7zipUninstall" (
-            cd ..\..\C\Util\7zipUninstall
-            nmake NEW_COMPILER=1 MY_CPU=AMD64
-            cd ..\..\..\CPP\7zip
-          )
+          # 移到上传目录
+          $upload = "${{ runner.temp }}\upload"
+          New-Item -ItemType Directory -Force -Path $upload | Out-Null
+          Copy-Item $zipPath $upload
+          "UPLOAD_DIR=$upload" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Prepare output directories and collect files
-        shell: pwsh
-        run: |
-          $origSrc = "${{ runner.temp }}\src_orig"
-          $custSrc = "${{ runner.temp }}\src_custom"
-          $tmp = "${{ runner.temp }}\tmp_out"
-          $origOut = "$tmp\orig"
-          $custOut = "$tmp\cust"
-          New-Item -ItemType Directory -Force -Path $origOut, $custOut | Out-Null
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.flavor }}
+          path: ${{ env.UPLOAD_DIR }}\*
 
-          function Collect-BuildOutput($srcRoot, $destDir) {
-            $base = "$srcRoot\CPP\7zip"
-            # 核心文件（依照您的脚本）
-            Copy-Item "$base\Bundles\Format7zF\x64\7z.dll" $destDir -ErrorAction Stop
-            Copy-Item "$base\UI\Console\x64\7z.exe" $destDir -ErrorAction Stop
-            Copy-Item "$base\UI\FileManager\x64\7zFM.exe" $destDir -ErrorAction Stop
-            Copy-Item "$base\UI\GUI\x64\7zG.exe" $destDir -ErrorAction Stop
-            Copy-Item "$base\Bundles\SFXWin\x64\7z.sfx" $destDir -ErrorAction Stop
-            Copy-Item "$base\Bundles\SFXCon\x64\7zCon.sfx" $destDir -ErrorAction Stop
-            Copy-Item "$base\UI\Explorer\x64\7-zip.dll" $destDir -ErrorAction Stop
-            if (Test-Path "$base\UI\Explorer\x86\7-zip.dll") {
-              Copy-Item "$base\UI\Explorer\x86\7-zip.dll" "$destDir\7-zip32.dll" -ErrorAction SilentlyContinue
-            }
-            # 安装/卸载工具
-            $uninst = "$srcRoot\C\Util\7zipUninstall\x64\7zipUninstall.exe"
-            if (Test-Path $uninst) { Copy-Item $uninst "$destDir\Uninstall.exe" -ErrorAction SilentlyContinue }
-            $install = "$srcRoot\C\Util\7zipInstall\x64\7zipInstall.exe"
-            if (Test-Path $install) { Copy-Item $install "$destDir\7zipInstall.exe" -ErrorAction SilentlyContinue }
-          }
+  # ---------- 发布 ----------
+  release:
+    needs: [setup, build]
+    if: needs.setup.outputs.skip != 'true' && success()
+    runs-on: ubuntu-latest
+    env:
+      BUILD_TAG: ${{ needs.setup.outputs.build_tag }}
+      VERSION: ${{ needs.setup.outputs.version }}
+      VERSION_DIGITS: ${{ needs.setup.outputs.version_digits }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-          Collect-BuildOutput $origSrc $origOut
-          Collect-BuildOutput $custSrc $custOut
-
-          # 下载官方安装包提取附加文件
-          $officialExe = "https://www.7-zip.org/a/7z$env:VERSION_DIGITS-x64.exe"
-          $officialDest = "$tmp\official.exe"
-          Write-Host "Downloading official installer: $officialExe"
-          Invoke-WebRequest -Uri $officialExe -OutFile $officialDest -ErrorAction Stop
-          $officialExtract = "$tmp\official_ext"
-          & "$origOut\7z.exe" x $officialDest -o"$officialExtract" -y | Out-Null
-
-          # 拷贝官方文本文件和语言文件到两个版本
-          foreach ($outDir in @($origOut, $custOut)) {
-            Copy-Item "$officialExtract\History.txt" $outDir -ErrorAction SilentlyContinue
-            Copy-Item "$officialExtract\License.txt" $outDir -ErrorAction SilentlyContinue
-            Copy-Item "$officialExtract\readme.txt" $outDir -ErrorAction SilentlyContinue
-            Copy-Item "$officialExtract\7-zip.chm" $outDir -ErrorAction SilentlyContinue
-            Copy-Item "$officialExtract\descript.ion" $outDir -ErrorAction SilentlyContinue
-            if (Test-Path "$officialExtract\Lang") {
-              Copy-Item -Recurse -Force "$officialExtract\Lang\*" "$outDir\Lang\" -ErrorAction SilentlyContinue
-            } else {
-              New-Item -ItemType Directory -Force -Path "$outDir\Lang" | Out-Null
-            }
-          }
-
-          # 制作绿色 ZIP（不包含安装/卸载程序）
-          $origGreen = "$tmp\green_orig"
-          $custGreen = "$tmp\green_cust"
-          New-Item -ItemType Directory -Force -Path $origGreen, $custGreen | Out-Null
-          function Make-GreenZip($builtDir, $greenDir, $zipPath) {
-            Copy-Item -Recurse -Force "$builtDir\*" $greenDir -ErrorAction Stop
-            Remove-Item "$greenDir\Uninstall.exe" -Force -ErrorAction SilentlyContinue
-            Remove-Item "$greenDir\7zipInstall.exe" -Force -ErrorAction SilentlyContinue
-            Compress-Archive -Path "$greenDir\*" -DestinationPath $zipPath -Force
-          }
-          $origZip = "${{ runner.temp }}\7z-orig-$env:VERSION-x64.zip"
-          $custZip = "${{ runner.temp }}\7z-custom-$env:VERSION-x64.zip"
-          Make-GreenZip $origOut $origGreen $origZip
-          Make-GreenZip $custOut $custGreen $custZip
-          "ORIG_GREEN_ZIP=$origZip" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "CUSTOM_GREEN_ZIP=$custZip" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "ORIG_BUILT_DIR=$origOut" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "CUST_BUILT_DIR=$custOut" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "OFFICIAL_DIR=$officialExtract" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Create installers
-        shell: pwsh
-        run: |
-          $origBuilt = $env:ORIG_BUILT_DIR
-          $custBuilt = $env:CUST_BUILT_DIR
-          $officialDir = $env:OFFICIAL_DIR
-          $tmp = "${{ runner.temp }}\installers"
-          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-
-          function Build-Installer($builtDir, $outputName) {
-            $packDir = Join-Path $tmp $outputName
-            Copy-Item -Recurse -Force "$builtDir\*" $packDir -ErrorAction Stop
-
-            # 确保安装启动模块存在（优先使用编译产物，其次从官方包提取）
-            $installStub = ""
-            if (Test-Path "$packDir\7zipInstall.exe") {
-              $installStub = "$packDir\7zipInstall.exe"
-            } elseif (Test-Path "$packDir\7z.sfx") {
-              $installStub = "$packDir\7z.sfx"
-            } else {
-              # 尝试从官方提取目录复制备用 stub
-              if (Test-Path "$officialDir\7z.sfx") {
-                Copy-Item "$officialDir\7z.sfx" $packDir -Force
-                $installStub = "$packDir\7z.sfx"
-              } elseif (Test-Path "$officialDir\7zipInstall.exe") {
-                Copy-Item "$officialDir\7zipInstall.exe" $packDir -Force
-                $installStub = "$packDir\7zipInstall.exe"
-              } else {
-                throw "未找到安装程序启动模块，且官方包中也不存在"
-              }
-            }
-
-            # 制作自解压安装包
-            $archive = "$tmp\$outputName.7z"
-            & "$packDir\7z.exe" a -mx=9 $archive "$packDir\*" -r -x!"7zipInstall.exe" -x!"7z.sfx" -x!"Uninstall.exe" | Out-Null
-            $installerExe = Join-Path $tmp "$outputName.exe"
-            cmd /c copy /b "$installStub" + "$archive" "$installerExe" | Out-Null
-            Write-Host "Installer created: $installerExe"
-            return $installerExe
-          }
-
-          $origInstaller = Build-Installer $origBuilt "7z-setup-orig-$env:VERSION-x64"
-          $custInstaller = Build-Installer $custBuilt "7z-setup-custom-$env:VERSION-x64"
-          "ORIG_INSTALLER=$origInstaller" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "CUSTOM_INSTALLER=$custInstaller" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.BUILD_TAG }}
@@ -287,15 +224,11 @@ jobs:
 
             ### 文件说明
             - **原始版本（绿色便携）**：`7z-orig-${{ env.VERSION }}-x64.zip`
-            - **原始版本（安装包）**：`7z-setup-orig-${{ env.VERSION }}-x64.exe`
             - **定制版本（绿色便携）**：`7z-custom-${{ env.VERSION }}-x64.zip` （替换了文件关联图标、工具栏贴图等）
-            - **定制版本（安装包）**：`7z-setup-custom-${{ env.VERSION }}-x64.exe`
 
             > ⚙️ 本仓库仅提供自动编译与资源替换，源码版权归属 7-Zip 原作者 Igor Pavlov。
           files: |
-            ${{ env.ORIG_GREEN_ZIP }}
-            ${{ env.CUSTOM_GREEN_ZIP }}
-            ${{ env.ORIG_INSTALLER }}
-            ${{ env.CUSTOM_INSTALLER }}
+            artifacts/build-orig/7z-*.zip
+            artifacts/build-custom/7z-*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
