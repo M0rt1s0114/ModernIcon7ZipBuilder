@@ -19,25 +19,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set environment variables
-        shell: pwsh
-        run: |
-          # 使用北京时间作为日期 Tag
-          $dateTag = (Get-Date).ToString("yyyyMMdd")
-          "DATE_TAG=$dateTag" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Date tag: $dateTag"
-
       - name: Get latest 7-Zip version from ip7z/7zip tags
         id: version
         shell: pwsh
         run: |
-          # 使用 GitHub CLI 获取最新 tag 名称
           $tag = gh api repos/ip7z/7zip/tags --jq '.[0].name' --method GET 2>$null
           if (-not $tag) {
             throw "无法从 ip7z/7zip 获取最新 tag"
           }
           Write-Host "Latest tag: $tag"
-          # 提取版本号，例如 "v24.09" -> "24.09", "24.09" 直接使用
           $cleanTag = $tag -replace '^v', ''
           $parts = $cleanTag -split '\.'
           if ($parts.Count -ne 2) {
@@ -46,24 +36,51 @@ jobs:
           $major = $parts[0]
           $minor = $parts[1]
           $version = "$major.$minor"
-          $versionDigits = "$major$minor"    # 例如 2409
+          $versionDigits = "$major$minor"    # 例如 2602
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VERSION_DIGITS=$versionDigits" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Version: $versionDigits (from $tag)"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Skip if today's release already exists
+      - name: Check if this version already built
         shell: pwsh
         run: |
-          $tag = $env:DATE_TAG
-          # 检查 release 是否存在，不会因找不到而报错退出
-          gh release view $tag --repo $env:GITHUB_REPOSITORY --json name 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "Release for tag '$tag' already exists. Skipping build."
-            exit 0
+          $versionDigits = $env:VERSION_DIGITS
+          $releases = gh release list --json name --limit 100 --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($releases) {
+            $built = $releases | ConvertFrom-Json | Where-Object { $_.name -like "7zip-$versionDigits-*" }
+            if ($built) {
+              Write-Host "Release for version $versionDigits already exists. Skipping build."
+              exit 0
+            }
           }
-          Write-Host "No existing release for tag '$tag'. Proceeding with build."
+          Write-Host "No existing release for version $versionDigits. Proceeding."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine next build tag (YYHN)
+        id: buildtag
+        shell: pwsh
+        run: |
+          $yearSuffix = (Get-Date).Year % 100
+          $yearStr = $yearSuffix.ToString("00")   # 例如 "26"
+          $existingTags = gh release list --json tagName --limit 100 --repo $env:GITHUB_REPOSITORY 2>$null
+          $maxN = 0
+          if ($existingTags) {
+            $tags = ($existingTags | ConvertFrom-Json).tagName
+            $pattern = "^$yearStr`H(\d+)$"
+            foreach ($t in $tags) {
+              if ($t -match $pattern) {
+                $n = [int]$matches[1]
+                if ($n -gt $maxN) { $maxN = $n }
+              }
+            }
+          }
+          $nextN = $maxN + 1
+          $buildTag = "$yearStr`H$nextN"
+          Write-Host "Build tag: $buildTag"
+          "BUILD_TAG=$buildTag" | Out-File -FilePath $env:GITHUB_ENV -Append
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -83,29 +100,19 @@ jobs:
           "VCVARS=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Found vcvarsall.bat at: $vcvars"
 
-      - name: Download 7-Zip source and 7zr.exe
+      - name: Clone 7-Zip source from git
         shell: pwsh
         run: |
-          $dlDir = "${{ runner.temp }}\downloads"
-          New-Item -ItemType Directory -Force -Path $dlDir | Out-Null
-          $srcUrl = "https://www.7-zip.org/a/7z$env:VERSION_DIGITS-src.7z"
-          $7zrUrl = "https://www.7-zip.org/a/7zr.exe"
-          Write-Host "Downloading $srcUrl ..."
-          Invoke-WebRequest -Uri $srcUrl -OutFile "$dlDir\7zsrc.7z"
-          Write-Host "Downloading 7zr.exe ..."
-          Invoke-WebRequest -Uri $7zrUrl -OutFile "$dlDir\7zr.exe"
-
-      - name: Extract source and duplicate for custom build
-        shell: pwsh
-        run: |
-          $dlDir = "${{ runner.temp }}\downloads"
-          $7zr = "$dlDir\7zr.exe"
+          $tag = gh api repos/ip7z/7zip/tags --jq '.[0].name' --method GET 2>$null
+          if (-not $tag) { throw "无法获取 tag 用于克隆" }
           $orig = "${{ runner.temp }}\src_orig"
           $custom = "${{ runner.temp }}\src_custom"
-          Write-Host "Extracting to original source directory..."
-          & $7zr x "-o$orig" -y "$dlDir\7zsrc.7z" | Out-Null
-          Write-Host "Copying to custom source directory..."
+          Write-Host "Cloning tag $tag into $orig ..."
+          git clone -b $tag --depth 1 https://github.com/ip7z/7zip.git $orig
+          Write-Host "Copying to custom directory..."
           Copy-Item -Recurse -Force $orig\* $custom\
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Replace resources in custom build
         shell: pwsh
@@ -231,12 +238,12 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.DATE_TAG }}
-          name: 7zip-${{ env.VERSION_DIGITS }}-${{ env.DATE_TAG }}
+          tag_name: ${{ env.BUILD_TAG }}
+          name: 7zip-${{ env.VERSION_DIGITS }}-${{ env.BUILD_TAG }}
           body: |
-            ## 7-Zip ${{ env.VERSION }} (${{ env.DATE_TAG }})
+            ## 7-Zip ${{ env.VERSION }} (构建 ${{ env.BUILD_TAG }})
 
-            自动构建自 [7-Zip 官方源码](https://www.7-zip.org/)。
+            自动构建自 [7-Zip 官方源码](https://github.com/ip7z/7zip)。
 
             ### 文件说明
             - **原始版本（绿色便携）**：`7z-orig-${{ env.VERSION }}-x64.zip`
