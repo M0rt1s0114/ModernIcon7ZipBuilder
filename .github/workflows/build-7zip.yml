@@ -2,8 +2,8 @@ name: Auto Build 7-Zip x64 (Original + Custom) with Installers
 
 on:
   schedule:
-    - cron: '0 0 * * *'          # 每天 UTC 0 点检查
-  workflow_dispatch:             # 手动触发
+    - cron: '0 0 * * *'
+  workflow_dispatch:
   push:
     paths:
       - '.github/workflows/build-7zip.yml'
@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7   # 请确认最新版是 v7，若不是可改为 v4
 
       - name: Get latest 7-Zip version from ip7z/7zip tags
         id: version
@@ -111,6 +111,11 @@ jobs:
           git clone -b $tag --depth 1 https://github.com/ip7z/7zip.git $orig
           Write-Host "Cloning tag $tag into $custom ..."
           git clone -b $tag --depth 1 https://github.com/ip7z/7zip.git $custom
+          # 验证关键路径
+          if (-not (Test-Path "$orig\CPP\7zip")) {
+            throw "源码目录结构与预期不符：未找到 CPP\7zip"
+          }
+          Write-Host "Source directories are ready."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -131,6 +136,12 @@ jobs:
         run: |
           call "${{ env.VCVARS }}" x64
           nmake NEW_COMPILER=1 MY_CPU=AMD64
+          if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+          if not exist "Bundles\Format7zF\7z.exe" (
+            echo "Error: 7z.exe not found after build"
+            exit /b 1
+          )
+          echo "Original build succeeded."
 
       - name: Build custom (x64)
         shell: cmd
@@ -138,6 +149,12 @@ jobs:
         run: |
           call "${{ env.VCVARS }}" x64
           nmake NEW_COMPILER=1 MY_CPU=AMD64
+          if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+          if not exist "Bundles\Format7zF\7z.exe" (
+            echo "Error: 7z.exe not found after build"
+            exit /b 1
+          )
+          echo "Custom build succeeded."
 
       - name: Collect green packages
         shell: pwsh
@@ -233,7 +250,7 @@ jobs:
           "CUSTOM_INSTALLER=$installOut\7z-setup-custom-$env:VERSION-x64.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3   # 您确认的最新版
         with:
           tag_name: ${{ env.BUILD_TAG }}
           name: 7zip-${{ env.VERSION_DIGITS }}-${{ env.BUILD_TAG }}
