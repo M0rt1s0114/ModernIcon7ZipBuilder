@@ -6,14 +6,14 @@ on:
   workflow_dispatch:             # 手动触发
   push:
     paths:
-      - '.github/workflows/build-7zip.yml'   # 工作流变动时触发测试
+      - '.github/workflows/build-7zip.yml'
 
 permissions:
-  contents: write                # 用于创建 Release
+  contents: write
 
 jobs:
   build:
-    runs-on: windows-latest      # 自带 Visual Studio 2022
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
@@ -36,7 +36,7 @@ jobs:
           $major = $parts[0]
           $minor = $parts[1]
           $version = "$major.$minor"
-          $versionDigits = "$major$minor"    # 例如 2602
+          $versionDigits = "$major$minor"
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VERSION_DIGITS=$versionDigits" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Version: $versionDigits (from $tag)"
@@ -64,7 +64,7 @@ jobs:
         shell: pwsh
         run: |
           $yearSuffix = (Get-Date).Year % 100
-          $yearStr = $yearSuffix.ToString("00")   # 例如 "26"
+          $yearStr = $yearSuffix.ToString("00")
           $existingTags = gh release list --json tagName --limit 100 --repo $env:GITHUB_REPOSITORY 2>$null
           $maxN = 0
           if ($existingTags) {
@@ -100,17 +100,17 @@ jobs:
           "VCVARS=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Found vcvarsall.bat at: $vcvars"
 
-      - name: Clone 7-Zip source from git
+      - name: Clone 7-Zip source from git (original & custom)
         shell: pwsh
         run: |
           $tag = gh api repos/ip7z/7zip/tags --jq '.[0].name' --method GET 2>$null
-          if (-not $tag) { throw "无法获取 tag 用于克隆" }
+          if (-not $tag) { throw "无法获取最新 tag 用于克隆" }
           $orig = "${{ runner.temp }}\src_orig"
           $custom = "${{ runner.temp }}\src_custom"
           Write-Host "Cloning tag $tag into $orig ..."
           git clone -b $tag --depth 1 https://github.com/ip7z/7zip.git $orig
-          Write-Host "Copying to custom directory..."
-          Copy-Item -Recurse -Force $orig\* $custom\
+          Write-Host "Cloning tag $tag into $custom ..."
+          git clone -b $tag --depth 1 https://github.com/ip7z/7zip.git $custom
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -139,7 +139,6 @@ jobs:
           call "${{ env.VCVARS }}" x64
           nmake NEW_COMPILER=1 MY_CPU=AMD64
 
-      # ── 收集绿色便携版文件 ──
       - name: Collect green packages
         shell: pwsh
         run: |
@@ -174,7 +173,6 @@ jobs:
           "CUSTOM_GREEN_ZIP=$customZip" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Green ZIPs created."
 
-      # ── 生成自解压安装包 ──
       - name: Create installers
         shell: pwsh
         run: |
@@ -234,7 +232,6 @@ jobs:
           "ORIG_INSTALLER=$installOut\7z-setup-orig-$env:VERSION-x64.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CUSTOM_INSTALLER=$installOut\7z-setup-custom-$env:VERSION-x64.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # ── 发布到 Release ──
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
