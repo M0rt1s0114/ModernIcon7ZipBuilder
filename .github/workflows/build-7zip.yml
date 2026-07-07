@@ -27,35 +27,31 @@ jobs:
           "DATE_TAG=$dateTag" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Date tag: $dateTag"
 
-      - name: Get latest 7-Zip version from official site
+      - name: Get latest 7-Zip version from ip7z/7zip tags
         id: version
         shell: pwsh
         run: |
-          $page = Invoke-WebRequest -Uri "https://www.7-zip.org/" -UseBasicParsing -TimeoutSec 30
-          $content = $page.Content
-          Write-Host "Downloaded page length: $($content.Length)"
-
-          # 尝试多种正则匹配，适应可能的格式变化
-          if ($content -match '7z(\d{4})-src\.7z') {
-              # 匹配四位数版本，如 7z2600-src.7z
-              $digits = $Matches[1]
-              $major = $digits.Substring(0,2)
-              $minor = $digits.Substring(2,2)
-          } elseif ($content -match '7z(\d{2})(\d{2})-src\.7z') {
-              # 匹配原有格式，如 7z26 00-src.7z（实际上不会断开，但保留）
-              $major = $Matches[1]
-              $minor = $Matches[2]
-          } else {
-              Write-Host "Failed to parse version. Page content (first 1000 chars):"
-              Write-Host $content.Substring(0, [Math]::Min(1000, $content.Length))
-              throw "无法从 7-Zip 官网解析出最新版本号"
+          # 使用 GitHub CLI 获取最新 tag 名称
+          $tag = gh api repos/ip7z/7zip/tags --jq '.[0].name' --method GET 2>$null
+          if (-not $tag) {
+            throw "无法从 ip7z/7zip 获取最新 tag"
           }
-
-          $version = "$major.$minor"         # 例如 26.00
-          $versionDigits = "$major$minor"    # 例如 2600
+          Write-Host "Latest tag: $tag"
+          # 提取版本号，例如 "v24.09" -> "24.09", "24.09" 直接使用
+          $cleanTag = $tag -replace '^v', ''
+          $parts = $cleanTag -split '\.'
+          if ($parts.Count -ne 2) {
+            throw "Tag 格式不是 X.Y: $tag"
+          }
+          $major = $parts[0]
+          $minor = $parts[1]
+          $version = "$major.$minor"
+          $versionDigits = "$major$minor"    # 例如 2409
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VERSION_DIGITS=$versionDigits" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Latest version: $version ($versionDigits)"
+          Write-Host "Version: $versionDigits (from $tag)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Skip if today's release already exists
         shell: pwsh
