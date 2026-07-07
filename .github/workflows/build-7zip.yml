@@ -1,0 +1,251 @@
+name: Auto Build 7-Zip x64 (Original + Custom) with Installers
+
+on:
+  schedule:
+    - cron: '0 0 * * *'          # 每天 UTC 0 点检查
+  workflow_dispatch:             # 手动触发
+  push:
+    paths:
+      - '.github/workflows/build-7zip.yml'   # 工作流变动时触发测试
+
+permissions:
+  contents: write                # 用于创建 Release
+
+jobs:
+  build:
+    runs-on: windows-latest      # 自带 Visual Studio 2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set environment variables
+        shell: pwsh
+        run: |
+          # 使用北京时间作为日期 Tag
+          $dateTag = (Get-Date).ToString("yyyyMMdd")
+          "DATE_TAG=$dateTag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Date tag: $dateTag"
+
+      - name: Get latest 7-Zip version from official site
+        id: version
+        shell: pwsh
+        run: |
+          $page = Invoke-WebRequest -Uri "https://www.7-zip.org/" -UseBasicParsing -TimeoutSec 30
+          if ($page.Content -match '7z(\d{2})(\d{2})-src\.7z') {
+            $major = $Matches[1]
+            $minor = $Matches[2]
+            $versionDigits = "$major$minor"   # 例如 2600
+            $version = "$major.$minor"        # 例如 26.00
+            "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "VERSION_DIGITS=$versionDigits" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "Latest version: $version ($versionDigits)"
+          } else {
+            throw "无法从 7-Zip 官网解析出最新版本号"
+          }
+
+      - name: Skip if today's release already exists
+        shell: pwsh
+        run: |
+          $tag = $env:DATE_TAG
+          # 检查该 Tag 是否已存在
+          $exists = gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($exists) {
+            Write-Host "Release for tag '$tag' already exists. Skipping build."
+            exit 0
+          }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find Visual Studio vcvarsall.bat
+        id: find_vs
+        shell: pwsh
+        run: |
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vsWhere)) {
+            throw "vswhere not found"
+          }
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) {
+            throw "No suitable Visual Studio installation found"
+          }
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
+          "VCVARS=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Found vcvarsall.bat at: $vcvars"
+
+      - name: Download 7-Zip source and 7zr.exe
+        shell: pwsh
+        run: |
+          $dlDir = "${{ runner.temp }}\downloads"
+          New-Item -ItemType Directory -Force -Path $dlDir | Out-Null
+          $srcUrl = "https://www.7-zip.org/a/7z$env:VERSION_DIGITS-src.7z"
+          $7zrUrl = "https://www.7-zip.org/a/7zr.exe"
+          Write-Host "Downloading $srcUrl ..."
+          Invoke-WebRequest -Uri $srcUrl -OutFile "$dlDir\7zsrc.7z"
+          Write-Host "Downloading 7zr.exe ..."
+          Invoke-WebRequest -Uri $7zrUrl -OutFile "$dlDir\7zr.exe"
+
+      - name: Extract source and duplicate for custom build
+        shell: pwsh
+        run: |
+          $dlDir = "${{ runner.temp }}\downloads"
+          $7zr = "$dlDir\7zr.exe"
+          $orig = "${{ runner.temp }}\src_orig"
+          $custom = "${{ runner.temp }}\src_custom"
+          Write-Host "Extracting to original source directory..."
+          & $7zr x "-o$orig" -y "$dlDir\7zsrc.7z" | Out-Null
+          Write-Host "Copying to custom source directory..."
+          Copy-Item -Recurse -Force $orig\* $custom\
+
+      - name: Replace resources in custom build
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:GITHUB_WORKSPACE "scripts\replace-resources.ps1"
+          $resDir = Join-Path $env:GITHUB_WORKSPACE "resources"
+          if (Test-Path $script) {
+            & $script -BuildDirectory "${{ runner.temp }}\src_custom" -ResourceDir $resDir
+          } else {
+            throw "替换脚本 scripts\replace-resources.ps1 不存在"
+          }
+
+      - name: Build original (x64)
+        shell: cmd
+        working-directory: ${{ runner.temp }}\src_orig\CPP\7zip
+        run: |
+          call "${{ env.VCVARS }}" x64
+          nmake NEW_COMPILER=1 MY_CPU=AMD64
+
+      - name: Build custom (x64)
+        shell: cmd
+        working-directory: ${{ runner.temp }}\src_custom\CPP\7zip
+        run: |
+          call "${{ env.VCVARS }}" x64
+          nmake NEW_COMPILER=1 MY_CPU=AMD64
+
+      # ── 收集绿色便携版文件 ──
+      - name: Collect green packages
+        shell: pwsh
+        run: |
+          $origSrc = "${{ runner.temp }}\src_orig"
+          $customSrc = "${{ runner.temp }}\src_custom"
+          $origGreen = "${{ runner.temp }}\green_orig"
+          $customGreen = "${{ runner.temp }}\green_custom"
+
+          function Copy-Files($srcBase, $destDir) {
+            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            Copy-Item "$srcBase\CPP\7zip\Bundles\Format7zF\7z.exe" $destDir -ErrorAction Stop
+            Copy-Item "$srcBase\CPP\7zip\Bundles\Format7zF\7z.dll" $destDir -ErrorAction Stop
+            Copy-Item "$srcBase\CPP\7zip\Bundles\Fm\7zG.exe" $destDir -ErrorAction SilentlyContinue
+            Copy-Item "$srcBase\CPP\7zip\Bundles\Fm\7zFM.exe" $destDir -ErrorAction SilentlyContinue
+            Copy-Item "$srcBase\CPP\7zip\Bundles\SFXCon\7zCon.sfx" $destDir -ErrorAction SilentlyContinue
+            Copy-Item "$srcBase\CPP\7zip\Bundles\SFXSetup\7zS.sfx" $destDir -ErrorAction SilentlyContinue
+            Copy-Item "$srcBase\CPP\7zip\Bundles\SFXSetup\7zSD.sfx" $destDir -ErrorAction SilentlyContinue
+            if (Test-Path "$srcBase\CPP\7zip\UI\FileManager\Lang") {
+              Copy-Item -Recurse "$srcBase\CPP\7zip\UI\FileManager\Lang" "$destDir\Lang" -ErrorAction SilentlyContinue
+            }
+            Copy-Item "$srcBase\CPP\7zip\UI\FileManager\7-zip.chm" $destDir -ErrorAction SilentlyContinue
+          }
+
+          Copy-Files $origSrc $origGreen
+          Copy-Files $customSrc $customGreen
+
+          # 打包为 zip
+          $origZip = "${{ runner.temp }}\7z-orig-$env:VERSION-x64.zip"
+          $customZip = "${{ runner.temp }}\7z-custom-$env:VERSION-x64.zip"
+          Compress-Archive -Path "$origGreen\*" -DestinationPath $origZip -Force
+          Compress-Archive -Path "$customGreen\*" -DestinationPath $customZip -Force
+          "ORIG_GREEN_ZIP=$origZip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CUSTOM_GREEN_ZIP=$customZip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Green ZIPs created."
+
+      # ── 生成自解压安装包 ──
+      - name: Create installers
+        shell: pwsh
+        run: |
+          $origSrc = "${{ runner.temp }}\src_orig"
+          $customSrc = "${{ runner.temp }}\src_custom"
+          $tmp = "${{ runner.temp }}\installer_tmp"
+          $installOut = "${{ runner.temp }}\installers"
+          New-Item -ItemType Directory -Force -Path $tmp, $installOut | Out-Null
+
+          function Build-Installer($srcBase, $outputName) {
+            # 准备安装文件目录
+            $instDir = Join-Path $tmp $outputName
+            New-Item -ItemType Directory -Force -Path $instDir | Out-Null
+
+            # 复制全部绿色文件到临时安装目录
+            Copy-Item "$srcBase\CPP\7zip\Bundles\Format7zF\7z.exe" $instDir -ErrorAction Stop
+            Copy-Item "$srcBase\CPP\7zip\Bundles\Format7zF\7z.dll" $instDir -ErrorAction Stop
+            Copy-Item "$srcBase\CPP\7zip\Bundles\Fm\7zG.exe" $instDir -ErrorAction SilentlyContinue
+            Copy-Item "$srcBase\CPP\7zip\Bundles\Fm\7zFM.exe" $instDir -ErrorAction SilentlyContinue
+            Copy-Item "$srcBase\CPP\7zip\Bundles\SFXCon\7zCon.sfx" $instDir -ErrorAction SilentlyContinue
+            Copy-Item "$srcBase\CPP\7zip\Bundles\SFXSetup\7zS.sfx" $instDir -ErrorAction SilentlyContinue
+            Copy-Item "$srcBase\CPP\7zip\Bundles\SFXSetup\7zSD.sfx" $instDir -ErrorAction SilentlyContinue
+            if (Test-Path "$srcBase\CPP\7zip\UI\FileManager\Lang") {
+              Copy-Item -Recurse "$srcBase\CPP\7zip\UI\FileManager\Lang" "$instDir\Lang" -ErrorAction SilentlyContinue
+            }
+            Copy-Item "$srcBase\CPP\7zip\UI\FileManager\7-zip.chm" $instDir -ErrorAction SilentlyContinue
+
+            # 创建自解压配置文件
+            $config = @"
+;!@Install@!UTF-8!
+Title="7-Zip $env:VERSION (x64)"
+BeginPrompt="Do you want to install 7-Zip $env:VERSION (x64)?"
+RunProgram="7zFM.exe"
+;!@InstallEnd@!
+"@
+            $configPath = Join-Path $instDir "config.txt"
+            Set-Content -Path $configPath -Value $config -Encoding UTF8
+
+            # 打包为 7z 压缩包
+            $archive = "$tmp\$outputName.7z"
+            $7zExe = "$instDir\7z.exe"
+            if (-not (Test-Path $7zExe)) {
+              # 如果当前编译的 7z.exe 不存在，回退到系统已安装的 7z.exe（极少数情况）
+              throw "编译的 7z.exe 未找到"
+            }
+            Push-Location $instDir
+            & $7zExe a -mx=9 $archive * -r -x!"config.txt" | Out-Null
+            Pop-Location
+
+            # 使用 7zSD.sfx 生成安装程序
+            $sfxModule = "$instDir\7zSD.sfx"
+            if (-not (Test-Path $sfxModule)) {
+              throw "7zSD.sfx 未找到"
+            }
+            $installerExe = Join-Path $installOut "$outputName.exe"
+            cmd /c copy /b "$sfxModule" + "$configPath" + "$archive" "$installerExe" | Out-Null
+            Write-Host "Installer created: $installerExe"
+          }
+
+          Build-Installer $origSrc "7z-setup-orig-$env:VERSION-x64"
+          Build-Installer $customSrc "7z-setup-custom-$env:VERSION-x64"
+
+          "ORIG_INSTALLER=$installOut\7z-setup-orig-$env:VERSION-x64.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CUSTOM_INSTALLER=$installOut\7z-setup-custom-$env:VERSION-x64.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # ── 发布到 Release ──
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.DATE_TAG }}
+          name: 7zip-${{ env.VERSION_DIGITS }}-${{ env.DATE_TAG }}
+          body: |
+            ## 7-Zip ${{ env.VERSION }} (${{ env.DATE_TAG }})
+
+            自动构建自 [7-Zip 官方源码](https://www.7-zip.org/)。
+
+            ### 文件说明
+            - **原始版本（绿色便携）**：`7z-orig-${{ env.VERSION }}-x64.zip`
+            - **原始版本（安装包）**：`7z-setup-orig-${{ env.VERSION }}-x64.exe`
+            - **定制版本（绿色便携）**：`7z-custom-${{ env.VERSION }}-x64.zip` （替换了文件关联图标、工具栏贴图等）
+            - **定制版本（安装包）**：`7z-setup-custom-${{ env.VERSION }}-x64.exe`
+
+            > ⚙️ 本仓库仅提供自动编译与资源替换，源码版权归属 7-Zip 原作者 Igor Pavlov。
+          files: |
+            ${{ env.ORIG_GREEN_ZIP }}
+            ${{ env.CUSTOM_GREEN_ZIP }}
+            ${{ env.ORIG_INSTALLER }}
+            ${{ env.CUSTOM_INSTALLER }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
