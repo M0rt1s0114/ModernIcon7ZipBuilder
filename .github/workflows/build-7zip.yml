@@ -32,23 +32,35 @@ jobs:
         shell: pwsh
         run: |
           $page = Invoke-WebRequest -Uri "https://www.7-zip.org/" -UseBasicParsing -TimeoutSec 30
-          if ($page.Content -match '7z(\d{2})(\d{2})-src\.7z') {
-            $major = $Matches[1]
-            $minor = $Matches[2]
-            $versionDigits = "$major$minor"   # 例如 2600
-            $version = "$major.$minor"        # 例如 26.00
-            "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "VERSION_DIGITS=$versionDigits" | Out-File -FilePath $env:GITHUB_ENV -Append
-            Write-Host "Latest version: $version ($versionDigits)"
+          $content = $page.Content
+          Write-Host "Downloaded page length: $($content.Length)"
+
+          # 尝试多种正则匹配，适应可能的格式变化
+          if ($content -match '7z(\d{4})-src\.7z') {
+              # 匹配四位数版本，如 7z2600-src.7z
+              $digits = $Matches[1]
+              $major = $digits.Substring(0,2)
+              $minor = $digits.Substring(2,2)
+          } elseif ($content -match '7z(\d{2})(\d{2})-src\.7z') {
+              # 匹配原有格式，如 7z26 00-src.7z（实际上不会断开，但保留）
+              $major = $Matches[1]
+              $minor = $Matches[2]
           } else {
-            throw "无法从 7-Zip 官网解析出最新版本号"
+              Write-Host "Failed to parse version. Page content (first 1000 chars):"
+              Write-Host $content.Substring(0, [Math]::Min(1000, $content.Length))
+              throw "无法从 7-Zip 官网解析出最新版本号"
           }
+
+          $version = "$major.$minor"         # 例如 26.00
+          $versionDigits = "$major$minor"    # 例如 2600
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VERSION_DIGITS=$versionDigits" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Latest version: $version ($versionDigits)"
 
       - name: Skip if today's release already exists
         shell: pwsh
         run: |
           $tag = $env:DATE_TAG
-          # 检查该 Tag 是否已存在
           $exists = gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
           if ($exists) {
             Write-Host "Release for tag '$tag' already exists. Skipping build."
@@ -149,7 +161,6 @@ jobs:
           Copy-Files $origSrc $origGreen
           Copy-Files $customSrc $customGreen
 
-          # 打包为 zip
           $origZip = "${{ runner.temp }}\7z-orig-$env:VERSION-x64.zip"
           $customZip = "${{ runner.temp }}\7z-custom-$env:VERSION-x64.zip"
           Compress-Archive -Path "$origGreen\*" -DestinationPath $origZip -Force
@@ -158,7 +169,7 @@ jobs:
           "CUSTOM_GREEN_ZIP=$customZip" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Green ZIPs created."
 
-      # ── 生成自解压安装包（修复了 YAML 不兼容的 heredoc）──
+      # ── 生成自解压安装包 ──
       - name: Create installers
         shell: pwsh
         run: |
@@ -172,7 +183,6 @@ jobs:
             $instDir = Join-Path $tmp $outputName
             New-Item -ItemType Directory -Force -Path $instDir | Out-Null
 
-            # 复制文件
             Copy-Item "$srcBase\CPP\7zip\Bundles\Format7zF\7z.exe" $instDir -ErrorAction Stop
             Copy-Item "$srcBase\CPP\7zip\Bundles\Format7zF\7z.dll" $instDir -ErrorAction Stop
             Copy-Item "$srcBase\CPP\7zip\Bundles\Fm\7zG.exe" $instDir -ErrorAction SilentlyContinue
@@ -185,7 +195,6 @@ jobs:
             }
             Copy-Item "$srcBase\CPP\7zip\UI\FileManager\7-zip.chm" $instDir -ErrorAction SilentlyContinue
 
-            # 生成自解压配置文件（避免 heredoc 语法）
             $configPath = Join-Path $instDir "config.txt"
             $cfg = @(
               ";!@Install@!UTF-8!",
@@ -196,7 +205,6 @@ jobs:
             ) -join "`r`n"
             Set-Content -Path $configPath -Value $cfg -Encoding UTF8
 
-            # 打包为 7z 压缩包
             $archive = "$tmp\$outputName.7z"
             $7zExe = Join-Path $instDir "7z.exe"
             if (-not (Test-Path $7zExe)) {
@@ -206,7 +214,6 @@ jobs:
             & $7zExe a -mx=9 $archive * -r -x!"config.txt" | Out-Null
             Pop-Location
 
-            # 合并为 SFX 安装程序
             $sfxModule = Join-Path $instDir "7zSD.sfx"
             if (-not (Test-Path $sfxModule)) {
               throw "7zSD.sfx 未找到"
