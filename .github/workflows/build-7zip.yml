@@ -24,15 +24,11 @@ jobs:
         shell: pwsh
         run: |
           $tag = gh api repos/ip7z/7zip/tags --jq '.[0].name' --method GET 2>$null
-          if (-not $tag) {
-            throw "无法从 ip7z/7zip 获取最新 tag"
-          }
+          if (-not $tag) { throw "无法从 ip7z/7zip 获取最新 tag" }
           Write-Host "Latest tag: $tag"
           $cleanTag = $tag -replace '^v', ''
           $parts = $cleanTag -split '\.'
-          if ($parts.Count -ne 2) {
-            throw "Tag 格式不是 X.Y: $tag"
-          }
+          if ($parts.Count -ne 2) { throw "Tag 格式不是 X.Y: $tag" }
           $major = $parts[0]
           $minor = $parts[1]
           $version = "$major.$minor"
@@ -89,13 +85,9 @@ jobs:
         shell: pwsh
         run: |
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vsWhere)) {
-            throw "vswhere not found"
-          }
+          if (-not (Test-Path $vsWhere)) { throw "vswhere not found" }
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vsPath) {
-            throw "No suitable Visual Studio installation found"
-          }
+          if (-not $vsPath) { throw "No suitable Visual Studio installation found" }
           $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
           "VCVARS=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Found vcvarsall.bat at: $vcvars"
@@ -107,13 +99,9 @@ jobs:
           if (-not $tag) { throw "无法获取最新 tag 用于克隆" }
           $orig = "${{ runner.temp }}\src_orig"
           $custom = "${{ runner.temp }}\src_custom"
-          Write-Host "Cloning tag $tag into $orig ..."
           git clone -b $tag --depth 1 https://github.com/ip7z/7zip.git $orig
-          Write-Host "Cloning tag $tag into $custom ..."
           git clone -b $tag --depth 1 https://github.com/ip7z/7zip.git $custom
-          if (-not (Test-Path "$orig\CPP\7zip")) {
-            throw "源码目录结构与预期不符：未找到 CPP\7zip"
-          }
+          if (-not (Test-Path "$orig\CPP\7zip")) { throw "源码目录结构与预期不符" }
           Write-Host "Source directories ready."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -129,163 +117,151 @@ jobs:
             throw "替换脚本 scripts\replace-resources.ps1 不存在"
           }
 
-      - name: Build original (x64) and locate output
-        id: build_orig
+      - name: Build all targets (original)
         shell: cmd
         working-directory: ${{ runner.temp }}\src_orig\CPP\7zip
         run: |
           call "${{ env.VCVARS }}" x64
           nmake NEW_COMPILER=1 MY_CPU=AMD64
           if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
-          echo [INFO] Listing all 7z.exe files under source tree:
-          for /r %%i in (7z.exe) do echo %%i
-          for /r %%i in (7z.dll) do echo %%i
-          rem 搜索实际的 7z.exe 路径，优先选择 Bundles\Format7zF 下的
-          set "EXE_PATH="
-          for /r %%i in (7z.exe) do (
-            if not defined EXE_PATH set "EXE_PATH=%%~dpi"
+          rem 编译安装/卸载工具（如果存在）
+          if exist "..\..\C\Util\7zipInstall" (
+            cd ..\..\C\Util\7zipInstall
+            nmake NEW_COMPILER=1 MY_CPU=AMD64
+            cd ..\..\..\CPP\7zip
           )
-          if not defined EXE_PATH (
-            echo [ERROR] No 7z.exe found anywhere in the build tree.
-            exit /b 1
+          if exist "..\..\C\Util\7zipUninstall" (
+            cd ..\..\C\Util\7zipUninstall
+            nmake NEW_COMPILER=1 MY_CPU=AMD64
+            cd ..\..\..\CPP\7zip
           )
-          echo [INFO] Using 7z.exe from: %EXE_PATH%
-          echo EXE_ORIG_DIR=%EXE_PATH%>> %GITHUB_ENV%
 
-      - name: Build custom (x64) and locate output
-        id: build_custom
+      - name: Build all targets (custom)
         shell: cmd
         working-directory: ${{ runner.temp }}\src_custom\CPP\7zip
         run: |
           call "${{ env.VCVARS }}" x64
           nmake NEW_COMPILER=1 MY_CPU=AMD64
           if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
-          for /r %%i in (7z.exe) do echo %%i
-          for /r %%i in (7z.dll) do echo %%i
-          set "EXE_PATH="
-          for /r %%i in (7z.exe) do (
-            if not defined EXE_PATH set "EXE_PATH=%%~dpi"
+          if exist "..\..\C\Util\7zipInstall" (
+            cd ..\..\C\Util\7zipInstall
+            nmake NEW_COMPILER=1 MY_CPU=AMD64
+            cd ..\..\..\CPP\7zip
           )
-          if not defined EXE_PATH (
-            echo [ERROR] No 7z.exe found anywhere in the build tree.
-            exit /b 1
+          if exist "..\..\C\Util\7zipUninstall" (
+            cd ..\..\C\Util\7zipUninstall
+            nmake NEW_COMPILER=1 MY_CPU=AMD64
+            cd ..\..\..\CPP\7zip
           )
-          echo EXE_CUSTOM_DIR=%EXE_PATH%>> %GITHUB_ENV%
 
-      - name: Collect green packages (dynamic paths)
+      - name: Prepare output directories and collect files
         shell: pwsh
         run: |
           $origSrc = "${{ runner.temp }}\src_orig"
-          $customSrc = "${{ runner.temp }}\src_custom"
-          # 获取 7z.exe 所在目录
-          $origExeDir = $env:EXE_ORIG_DIR.TrimEnd('\')
-          $custExeDir = $env:EXE_CUSTOM_DIR.TrimEnd('\')
-          Write-Host "Original 7z.exe dir: $origExeDir"
-          Write-Host "Custom 7z.exe dir: $custExeDir"
+          $custSrc = "${{ runner.temp }}\src_custom"
+          $tmp = "${{ runner.temp }}\tmp_out"
+          $origOut = "$tmp\orig"
+          $custOut = "$tmp\cust"
+          $origGreen = "$tmp\green_orig"
+          $custGreen = "$tmp\green_cust"
+          New-Item -ItemType Directory -Force -Path $origOut, $custOut, $origGreen, $custGreen | Out-Null
 
-          function Collect-AllFiles($exeDir, $greenDir) {
-            New-Item -ItemType Directory -Force -Path $greenDir | Out-Null
-            # 从 exeDir 复制 7z.exe 和 7z.dll
-            Copy-Item "$exeDir\7z.exe" $greenDir -ErrorAction Stop
-            Copy-Item "$exeDir\7z.dll" $greenDir -ErrorAction Stop
-            # 尝试从 Bundles\Fm 复制 GUI 程序（可能也需动态查找）
-            $fmDir = Join-Path (Split-Path $exeDir -Parent) "Fm"
-            if (Test-Path $fmDir) {
-              Copy-Item "$fmDir\7zG.exe" $greenDir -ErrorAction SilentlyContinue
-              Copy-Item "$fmDir\7zFM.exe" $greenDir -ErrorAction SilentlyContinue
+          function Collect-BuildOutput($srcRoot, $destDir) {
+            $base = "$srcRoot\CPP\7zip"
+            # 核心文件（依照您的脚本）
+            Copy-Item "$base\Bundles\Format7zF\x64\7z.dll" $destDir -ErrorAction Stop
+            Copy-Item "$base\UI\Console\x64\7z.exe" $destDir -ErrorAction Stop
+            Copy-Item "$base\UI\FileManager\x64\7zFM.exe" $destDir -ErrorAction Stop
+            Copy-Item "$base\UI\GUI\x64\7zG.exe" $destDir -ErrorAction Stop
+            Copy-Item "$base\Bundles\SFXWin\x64\7z.sfx" $destDir -ErrorAction Stop
+            Copy-Item "$base\Bundles\SFXCon\x64\7zCon.sfx" $destDir -ErrorAction Stop
+            Copy-Item "$base\UI\Explorer\x64\7-zip.dll" $destDir -ErrorAction Stop
+            if (Test-Path "$base\UI\Explorer\x86\7-zip.dll") {
+              Copy-Item "$base\UI\Explorer\x86\7-zip.dll" "$destDir\7-zip32.dll" -ErrorAction SilentlyContinue
             }
-            # 从根目录递归查找 SFX 模块（通常在 Bundles\SFX* 下）
-            $sfxCon = Get-ChildItem -Path $origSrc -Recurse -Filter "7zCon.sfx" | Select-Object -First 1
-            if ($sfxCon) { Copy-Item $sfxCon.FullName $greenDir }
-            $sfxS = Get-ChildItem -Path $origSrc -Recurse -Filter "7zS.sfx" | Select-Object -First 1
-            if ($sfxS) { Copy-Item $sfxS.FullName $greenDir }
-            $sfxSD = Get-ChildItem -Path $origSrc -Recurse -Filter "7zSD.sfx" | Select-Object -First 1
-            if ($sfxSD) { Copy-Item $sfxSD.FullName $greenDir }
-            # 语言文件
-            $langDir = Join-Path $origSrc "CPP\7zip\UI\FileManager\Lang"
-            if (Test-Path $langDir) { Copy-Item -Recurse $langDir "$greenDir\Lang" -ErrorAction SilentlyContinue }
-            # 帮助文件
-            $chm = Join-Path $origSrc "CPP\7zip\UI\FileManager\7-zip.chm"
-            if (Test-Path $chm) { Copy-Item $chm $greenDir -ErrorAction SilentlyContinue }
+            # 安装/卸载工具
+            $uninst = "$srcRoot\C\Util\7zipUninstall\x64\7zipUninstall.exe"
+            if (Test-Path $uninst) { Copy-Item $uninst "$destDir\Uninstall.exe" -ErrorAction SilentlyContinue }
+            $install = "$srcRoot\C\Util\7zipInstall\x64\7zipInstall.exe"
+            if (Test-Path $install) { Copy-Item $install "$destDir\7zipInstall.exe" -ErrorAction SilentlyContinue }
           }
 
-          $origGreen = "${{ runner.temp }}\green_orig"
-          $customGreen = "${{ runner.temp }}\green_custom"
-          Collect-AllFiles $origExeDir $origGreen
-          Collect-AllFiles $custExeDir $customGreen
+          Collect-BuildOutput $origSrc $origOut
+          Collect-BuildOutput $custSrc $custOut
 
+          # 下载官方安装包提取附加文件
+          $officialExe = "https://www.7-zip.org/a/7z$env:VERSION_DIGITS-x64.exe"
+          $officialDest = "$tmp\official.exe"
+          Write-Host "Downloading official installer: $officialExe"
+          Invoke-WebRequest -Uri $officialExe -OutFile $officialDest -ErrorAction Stop
+          $officialExtract = "$tmp\official_ext"
+          & "$origOut\7z.exe" x $officialDest -o"$officialExtract" -y | Out-Null
+
+          # 拷贝官方文本文件和语言文件到两个版本
+          foreach ($outDir in @($origOut, $custOut)) {
+            Copy-Item "$officialExtract\History.txt" $outDir -ErrorAction SilentlyContinue
+            Copy-Item "$officialExtract\License.txt" $outDir -ErrorAction SilentlyContinue
+            Copy-Item "$officialExtract\readme.txt" $outDir -ErrorAction SilentlyContinue
+            Copy-Item "$officialExtract\7-zip.chm" $outDir -ErrorAction SilentlyContinue
+            Copy-Item "$officialExtract\descript.ion" $outDir -ErrorAction SilentlyContinue
+            if (Test-Path "$officialExtract\Lang") {
+              Copy-Item -Recurse -Force "$officialExtract\Lang\*" "$outDir\Lang\" -ErrorAction SilentlyContinue
+            } else {
+              New-Item -ItemType Directory -Force -Path "$outDir\Lang" | Out-Null
+            }
+          }
+
+          # 制作绿色 ZIP（不包含安装/卸载程序）
+          function Make-GreenZip($builtDir, $greenDir, $zipPath) {
+            Copy-Item -Recurse -Force "$builtDir\*" $greenDir -ErrorAction Stop
+            # 移除安装/卸载程序（绿色版不需要）
+            Remove-Item "$greenDir\Uninstall.exe" -Force -ErrorAction SilentlyContinue
+            Remove-Item "$greenDir\7zipInstall.exe" -Force -ErrorAction SilentlyContinue
+            Compress-Archive -Path "$greenDir\*" -DestinationPath $zipPath -Force
+          }
           $origZip = "${{ runner.temp }}\7z-orig-$env:VERSION-x64.zip"
-          $customZip = "${{ runner.temp }}\7z-custom-$env:VERSION-x64.zip"
-          Compress-Archive -Path "$origGreen\*" -DestinationPath $origZip -Force
-          Compress-Archive -Path "$customGreen\*" -DestinationPath $customZip -Force
+          $custZip = "${{ runner.temp }}\7z-custom-$env:VERSION-x64.zip"
+          Make-GreenZip $origOut $origGreen $origZip
+          Make-GreenZip $custOut $custGreen $custZip
           "ORIG_GREEN_ZIP=$origZip" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "CUSTOM_GREEN_ZIP=$customZip" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Green ZIPs created."
+          "CUSTOM_GREEN_ZIP=$custZip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ORIG_BUILT_DIR=$origOut" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CUST_BUILT_DIR=$custOut" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OFFICIAL_DIR=$officialExtract" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Create installers (dynamic paths)
+      - name: Create installers
         shell: pwsh
         run: |
-          $origSrc = "${{ runner.temp }}\src_orig"
-          $customSrc = "${{ runner.temp }}\src_custom"
-          $tmp = "${{ runner.temp }}\installer_tmp"
-          $installOut = "${{ runner.temp }}\installers"
-          New-Item -ItemType Directory -Force -Path $tmp, $installOut | Out-Null
+          $origBuilt = $env:ORIG_BUILT_DIR
+          $custBuilt = $env:CUST_BUILT_DIR
+          $tmp = "${{ runner.temp }}\installers"
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
-          function Build-Installer($exeDir, $outputName) {
-            $instDir = Join-Path $tmp $outputName
-            New-Item -ItemType Directory -Force -Path $instDir | Out-Null
-
-            Copy-Item "$exeDir\7z.exe" $instDir -ErrorAction Stop
-            Copy-Item "$exeDir\7z.dll" $instDir -ErrorAction Stop
-            $fmDir = Join-Path (Split-Path $exeDir -Parent) "Fm"
-            if (Test-Path $fmDir) {
-              Copy-Item "$fmDir\7zG.exe" $instDir -ErrorAction SilentlyContinue
-              Copy-Item "$fmDir\7zFM.exe" $instDir -ErrorAction SilentlyContinue
+          function Build-Installer($builtDir, $outputName) {
+            $packDir = Join-Path $tmp $outputName
+            Copy-Item -Recurse -Force "$builtDir\*" $packDir -ErrorAction Stop
+            # 选择安装 stub
+            $installStub = ""
+            if (Test-Path "$packDir\7zipInstall.exe") {
+              $installStub = "$packDir\7zipInstall.exe"
+            } elseif (Test-Path "$packDir\7z.sfx") {
+              $installStub = "$packDir\7z.sfx"
+            } else {
+              throw "未找到安装程序启动模块"
             }
-            $sfxCon = Get-ChildItem -Path $origSrc -Recurse -Filter "7zCon.sfx" | Select-Object -First 1
-            if ($sfxCon) { Copy-Item $sfxCon.FullName $instDir }
-            $sfxS = Get-ChildItem -Path $origSrc -Recurse -Filter "7zS.sfx" | Select-Object -First 1
-            if ($sfxS) { Copy-Item $sfxS.FullName $instDir }
-            $sfxSD = Get-ChildItem -Path $origSrc -Recurse -Filter "7zSD.sfx" | Select-Object -First 1
-            if ($sfxSD) { Copy-Item $sfxSD.FullName $instDir }
-            $langDir = Join-Path $origSrc "CPP\7zip\UI\FileManager\Lang"
-            if (Test-Path $langDir) { Copy-Item -Recurse $langDir "$instDir\Lang" -ErrorAction SilentlyContinue }
-            $chm = Join-Path $origSrc "CPP\7zip\UI\FileManager\7-zip.chm"
-            if (Test-Path $chm) { Copy-Item $chm $instDir -ErrorAction SilentlyContinue }
-
-            $configPath = Join-Path $instDir "config.txt"
-            $cfg = @(
-              ";!@Install@!UTF-8!",
-              "Title=""7-Zip $env:VERSION (x64)""",
-              "BeginPrompt=""Do you want to install 7-Zip $env:VERSION (x64)?""",
-              "RunProgram=""7zFM.exe""",
-              ";!@InstallEnd@!"
-            ) -join "`r`n"
-            Set-Content -Path $configPath -Value $cfg -Encoding UTF8
-
+            # 制作自解压安装包
             $archive = "$tmp\$outputName.7z"
-            $7zExe = Join-Path $instDir "7z.exe"
-            if (-not (Test-Path $7zExe)) {
-              throw "编译的 7z.exe 未找到"
-            }
-            Push-Location $instDir
-            & $7zExe a -mx=9 $archive * -r -x!"config.txt" | Out-Null
-            Pop-Location
-
-            $sfxModule = Join-Path $instDir "7zSD.sfx"
-            if (-not (Test-Path $sfxModule)) {
-              throw "7zSD.sfx 未找到"
-            }
-            $installerExe = Join-Path $installOut "$outputName.exe"
-            cmd /c copy /b "$sfxModule" + "$configPath" + "$archive" "$installerExe" | Out-Null
+            & "$packDir\7z.exe" a -mx=9 $archive "$packDir\*" -r -x!"7zipInstall.exe" -x!"7z.sfx" -x!"Uninstall.exe" | Out-Null
+            $installerExe = Join-Path $tmp "$outputName.exe"
+            cmd /c copy /b "$installStub" + "$archive" "$installerExe" | Out-Null
             Write-Host "Installer created: $installerExe"
+            return $installerExe
           }
 
-          Build-Installer $env:EXE_ORIG_DIR.TrimEnd('\') "7z-setup-orig-$env:VERSION-x64"
-          Build-Installer $env:EXE_CUSTOM_DIR.TrimEnd('\') "7z-setup-custom-$env:VERSION-x64"
-
-          "ORIG_INSTALLER=$installOut\7z-setup-orig-$env:VERSION-x64.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "CUSTOM_INSTALLER=$installOut\7z-setup-custom-$env:VERSION-x64.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $origInstaller = Build-Installer $origBuilt "7z-setup-orig-$env:VERSION-x64"
+          $custInstaller = Build-Installer $custBuilt "7z-setup-custom-$env:VERSION-x64"
+          "ORIG_INSTALLER=$origInstaller" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CUSTOM_INSTALLER=$custInstaller" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
