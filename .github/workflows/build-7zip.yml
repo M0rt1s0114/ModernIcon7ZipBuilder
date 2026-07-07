@@ -162,9 +162,7 @@ jobs:
           $tmp = "${{ runner.temp }}\tmp_out"
           $origOut = "$tmp\orig"
           $custOut = "$tmp\cust"
-          $origGreen = "$tmp\green_orig"
-          $custGreen = "$tmp\green_cust"
-          New-Item -ItemType Directory -Force -Path $origOut, $custOut, $origGreen, $custGreen | Out-Null
+          New-Item -ItemType Directory -Force -Path $origOut, $custOut | Out-Null
 
           function Collect-BuildOutput($srcRoot, $destDir) {
             $base = "$srcRoot\CPP\7zip"
@@ -212,9 +210,11 @@ jobs:
           }
 
           # 制作绿色 ZIP（不包含安装/卸载程序）
+          $origGreen = "$tmp\green_orig"
+          $custGreen = "$tmp\green_cust"
+          New-Item -ItemType Directory -Force -Path $origGreen, $custGreen | Out-Null
           function Make-GreenZip($builtDir, $greenDir, $zipPath) {
             Copy-Item -Recurse -Force "$builtDir\*" $greenDir -ErrorAction Stop
-            # 移除安装/卸载程序（绿色版不需要）
             Remove-Item "$greenDir\Uninstall.exe" -Force -ErrorAction SilentlyContinue
             Remove-Item "$greenDir\7zipInstall.exe" -Force -ErrorAction SilentlyContinue
             Compress-Archive -Path "$greenDir\*" -DestinationPath $zipPath -Force
@@ -234,21 +234,33 @@ jobs:
         run: |
           $origBuilt = $env:ORIG_BUILT_DIR
           $custBuilt = $env:CUST_BUILT_DIR
+          $officialDir = $env:OFFICIAL_DIR
           $tmp = "${{ runner.temp }}\installers"
           New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
           function Build-Installer($builtDir, $outputName) {
             $packDir = Join-Path $tmp $outputName
             Copy-Item -Recurse -Force "$builtDir\*" $packDir -ErrorAction Stop
-            # 选择安装 stub
+
+            # 确保安装启动模块存在（优先使用编译产物，其次从官方包提取）
             $installStub = ""
             if (Test-Path "$packDir\7zipInstall.exe") {
               $installStub = "$packDir\7zipInstall.exe"
             } elseif (Test-Path "$packDir\7z.sfx") {
               $installStub = "$packDir\7z.sfx"
             } else {
-              throw "未找到安装程序启动模块"
+              # 尝试从官方提取目录复制备用 stub
+              if (Test-Path "$officialDir\7z.sfx") {
+                Copy-Item "$officialDir\7z.sfx" $packDir -Force
+                $installStub = "$packDir\7z.sfx"
+              } elseif (Test-Path "$officialDir\7zipInstall.exe") {
+                Copy-Item "$officialDir\7zipInstall.exe" $packDir -Force
+                $installStub = "$packDir\7zipInstall.exe"
+              } else {
+                throw "未找到安装程序启动模块，且官方包中也不存在"
+              }
             }
+
             # 制作自解压安装包
             $archive = "$tmp\$outputName.7z"
             & "$packDir\7z.exe" a -mx=9 $archive "$packDir\*" -r -x!"7zipInstall.exe" -x!"7z.sfx" -x!"Uninstall.exe" | Out-Null
