@@ -158,7 +158,7 @@ jobs:
           "CUSTOM_GREEN_ZIP=$customZip" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Green ZIPs created."
 
-      # ── 生成自解压安装包 ──
+      # ── 生成自解压安装包（修复了 YAML 不兼容的 heredoc）──
       - name: Create installers
         shell: pwsh
         run: |
@@ -169,11 +169,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path $tmp, $installOut | Out-Null
 
           function Build-Installer($srcBase, $outputName) {
-            # 准备安装文件目录
             $instDir = Join-Path $tmp $outputName
             New-Item -ItemType Directory -Force -Path $instDir | Out-Null
 
-            # 复制全部绿色文件到临时安装目录
+            # 复制文件
             Copy-Item "$srcBase\CPP\7zip\Bundles\Format7zF\7z.exe" $instDir -ErrorAction Stop
             Copy-Item "$srcBase\CPP\7zip\Bundles\Format7zF\7z.dll" $instDir -ErrorAction Stop
             Copy-Item "$srcBase\CPP\7zip\Bundles\Fm\7zG.exe" $instDir -ErrorAction SilentlyContinue
@@ -186,30 +185,29 @@ jobs:
             }
             Copy-Item "$srcBase\CPP\7zip\UI\FileManager\7-zip.chm" $instDir -ErrorAction SilentlyContinue
 
-            # 创建自解压配置文件
-            $config = @"
-;!@Install@!UTF-8!
-Title="7-Zip $env:VERSION (x64)"
-BeginPrompt="Do you want to install 7-Zip $env:VERSION (x64)?"
-RunProgram="7zFM.exe"
-;!@InstallEnd@!
-"@
+            # 生成自解压配置文件（避免 heredoc 语法）
             $configPath = Join-Path $instDir "config.txt"
-            Set-Content -Path $configPath -Value $config -Encoding UTF8
+            $cfg = @(
+              ";!@Install@!UTF-8!",
+              "Title=""7-Zip $env:VERSION (x64)""",
+              "BeginPrompt=""Do you want to install 7-Zip $env:VERSION (x64)?""",
+              "RunProgram=""7zFM.exe""",
+              ";!@InstallEnd@!"
+            ) -join "`r`n"
+            Set-Content -Path $configPath -Value $cfg -Encoding UTF8
 
             # 打包为 7z 压缩包
             $archive = "$tmp\$outputName.7z"
-            $7zExe = "$instDir\7z.exe"
+            $7zExe = Join-Path $instDir "7z.exe"
             if (-not (Test-Path $7zExe)) {
-              # 如果当前编译的 7z.exe 不存在，回退到系统已安装的 7z.exe（极少数情况）
               throw "编译的 7z.exe 未找到"
             }
             Push-Location $instDir
             & $7zExe a -mx=9 $archive * -r -x!"config.txt" | Out-Null
             Pop-Location
 
-            # 使用 7zSD.sfx 生成安装程序
-            $sfxModule = "$instDir\7zSD.sfx"
+            # 合并为 SFX 安装程序
+            $sfxModule = Join-Path $instDir "7zSD.sfx"
             if (-not (Test-Path $sfxModule)) {
               throw "7zSD.sfx 未找到"
             }
